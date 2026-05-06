@@ -109,7 +109,7 @@ def inject_lora_into_unet(unet: nn.Module, rank: int = 4, alpha: float = 4.0):
     lora_params = []
     n_replaced  = 0
     for module in unet.modules():
-        for attr in ('to_q', 'to_v'):
+        for attr in ('to_q', 'to_k', 'to_v'):
             layer = getattr(module, attr, None)
             if isinstance(layer, nn.Linear):
                 lora = LoRALinear(layer, rank=rank, alpha=alpha)
@@ -167,7 +167,7 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
     """
     torch_dtype    = torch.float16
     device         = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    sequence_length = 4           # single frame per iteration (memory-efficient)
+    sequence_length = 2           # temporal context for 3D UNet attention
     diffusion_step  = 20
     num_train_timesteps = 1000
 
@@ -360,6 +360,9 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
 
         ip2p.scheduler.config.num_train_timesteps = num_train_timesteps
         ip2p.scheduler.set_timesteps(diffusion_step)
+        
+        # Save image_latents before stacking for CFG (for single-conditional phi training)
+        image_latents_cond = image_latents.clone()
 
         # 2. Sample noise and timestep; form noisy latents z_t
         # Dynamic t sampling: high timesteps early (weak recon) → low timesteps late (strong recon)
@@ -425,19 +428,28 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
             os.execv(sys.executable, [sys.executable] + sys.argv)
 
         # ---- 8. LoRA (phi) update ----
-        #   DDPM denoising objective on the rendered latents.
-        #   This trains phi to model p_phi(z | cI, cT) — the distribution
-        #   of rendered images given the editing condition — making the
-        #   VSD gradient progressively sharper and more on-manifold.
+        #   Train phi on raw single-conditional prediction (not CFG output).
+        #   phi learns the text-conditional denoising: p_phi(ε | z_t, cI, cT)
+        with torch.enable_grad():
+            # Single conditional input only, no CFG stacking
+            latent_phi_train_input = torch.cat(
+                [noisy_latents.detach(), image_latents_cond.detach()], dim=1
+            )
+            noise_pred_phi_train = unet_phi(
+                latent_phi_train_input, t,
+                prompt_embeds[1:2].detach(),   # index 1 = text conditional only
+                None, None, False
+            )[0]
+        
         lora_optimizer.zero_grad()
-        loss_phi = 0.5 * F.mse_loss(noise_pred_phi_cfg, noise.detach(), reduction="mean")
+        loss_phi = 0.5 * F.mse_loss(noise_pred_phi_train, noise.detach(), reduction="mean")
         loss_phi.backward()
         lora_optimizer.step()
 
         # ---- cleanup ----
-        del (clean_latents, image_latents, uncond_image_latents,
-             latent_ip2p_input, latent_phi_input, image_cond_cat,
-             noise_pred_ip2p, noise_pred_phi, noise_pred_phi_cfg,
+        del (clean_latents, image_latents, image_latents_cond, uncond_image_latents,
+             latent_ip2p_input, latent_phi_input, latent_phi_train_input, image_cond_cat,
+             noise_pred_ip2p, noise_pred_phi, noise_pred_phi_cfg, noise_pred_phi_train,
              noise, grad, target, loss_vsd, loss_recon, loss_phi)
         torch.cuda.empty_cache()
 
@@ -478,49 +490,57 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
                         timer.get_elapsed_time(), scene.dataset_type)
             timer.start()
 
-            # ---- densification ----
-            if iteration < opt.densify_until_iter:
-                gaussians.max_radii2D[visibility_filter] = torch.max(
-                    gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
-                gaussians.add_densification_stats(
-                    viewspace_point_tensor_grad * 0.000001, visibility_filter)
-
-                opacity_threshold = (opt.opacity_threshold_fine_init
-                                     - iteration * (opt.opacity_threshold_fine_init
-                                                    - opt.opacity_threshold_fine_after)
-                                     / opt.densify_until_iter)
-                densify_threshold = (opt.densify_grad_threshold_fine_init
-                                     - iteration * (opt.densify_grad_threshold_fine_init
-                                                    - opt.densify_grad_threshold_after)
-                                     / opt.densify_until_iter)
-
-                if (iteration > opt.densify_from_iter
-                        and iteration % opt.densification_interval == 0
-                        and gaussians.get_xyz.shape[0] < 30000):
-                    size_threshold = 20 if iteration > opt.opacity_reset_interval else None
-                    gaussians.densify(densify_threshold, opacity_threshold,
-                                      scene.cameras_extent, size_threshold, 5, 5,
-                                      scene.model_path, iteration, stage)
-                    torch.cuda.empty_cache()
-
-                if (iteration > opt.pruning_from_iter
-                        and iteration % opt.pruning_interval == 0
-                        and gaussians.get_xyz.shape[0] > 10000):
-                    size_threshold = 20 if iteration > opt.opacity_reset_interval else None
-                    gaussians.prune(densify_threshold, opacity_threshold,
-                                    scene.cameras_extent, size_threshold)
-                    torch.cuda.empty_cache()
-
-                if (iteration % opt.densification_interval == 0
-                        and gaussians.get_xyz.shape[0] < 30000
-                        and opt.add_point):
-                    gaussians.grow(5, 5, scene.model_path, iteration, stage)
-
-                if iteration % opt.opacity_reset_interval == 0:
-                    print("reset opacity")
-                    gaussians.reset_opacity()
+            # ---- densification disabled for refinement stage ----
+            # Point cloud from prior stage already well-formed.
+            # Densification adds new Gaussians with no history that get pushed
+            # randomly by diffusion gradients → causes floaters and noise.
+            # if iteration < opt.densify_until_iter:
+            #     gaussians.max_radii2D[visibility_filter] = torch.max(
+            #         gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
+            #     gaussians.add_densification_stats(
+            #         viewspace_point_tensor_grad * 0.000001, visibility_filter)
+            # 
+            #     opacity_threshold = (opt.opacity_threshold_fine_init
+            #                          - iteration * (opt.opacity_threshold_fine_init
+            #                                         - opt.opacity_threshold_fine_after)
+            #                          / opt.densify_until_iter)
+            #     densify_threshold = (opt.densify_grad_threshold_fine_init
+            #                          - iteration * (opt.densify_grad_threshold_fine_init
+            #                                         - opt.densify_grad_threshold_after)
+            #                          / opt.densify_until_iter)
+            # 
+            #     if (iteration > opt.densify_from_iter
+            #             and iteration % opt.densification_interval == 0
+            #             and gaussians.get_xyz.shape[0] < 30000):
+            #         size_threshold = 20 if iteration > opt.opacity_reset_interval else None
+            #         gaussians.densify(densify_threshold, opacity_threshold,
+            #                           scene.cameras_extent, size_threshold, 5, 5,
+            #                           scene.model_path, iteration, stage)
+            #         torch.cuda.empty_cache()
+            # 
+            #     if (iteration > opt.pruning_from_iter
+            #             and iteration % opt.pruning_interval == 0
+            #             and gaussians.get_xyz.shape[0] > 10000):
+            #         size_threshold = 20 if iteration > opt.opacity_reset_interval else None
+            #         gaussians.prune(densify_threshold, opacity_threshold,
+            #                         scene.cameras_extent, size_threshold)
+            #         torch.cuda.empty_cache()
+            # 
+            #     if (iteration % opt.densification_interval == 0
+            #             and gaussians.get_xyz.shape[0] < 30000
+            #             and opt.add_point):
+            #         gaussians.grow(5, 5, scene.model_path, iteration, stage)
+            # 
+            #     if iteration % opt.opacity_reset_interval == 0:
+            #         print("reset opacity")
+            #         gaussians.reset_opacity()
 
             if iteration < opt.iterations:
+                # Gradient clipping to prevent exploding gradients from diffusion signal
+                torch.nn.utils.clip_grad_norm_(
+                    [p for group in gaussians.optimizer.param_groups for p in group['params']],
+                    max_norm=1.0
+                )
                 gaussians.optimizer.step()
                 gaussians.optimizer.zero_grad(set_to_none=True)
 
@@ -715,7 +735,7 @@ if __name__ == "__main__":
     # VSD-compatible prompt / guidance arguments (same CLI as before)
     parser.add_argument("--prompt",                type=str,   default="")
     parser.add_argument('--guidance_scale', type=float, default=7.5)
-    parser.add_argument('--image_guidance_scale', type=float, default=2.0)  
+    parser.add_argument('--image_guidance_scale', type=float, default=1.5)  
 
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
