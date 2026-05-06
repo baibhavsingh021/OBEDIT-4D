@@ -54,7 +54,7 @@ echo ""
 # echo ""
 
 echo "[4/4] Score refinement"
-python refine_sds.py \
+python refine_vsd.py \
     --configs "./arguments/${DATASET}/${SCENE_NAME}.py" \
     --ply_path "./output/${DATASET}/${SCENE_NAME}/point_cloud_3dedit/${PROMPT}/iteration_1000/point_cloud.ply" \
     -s "./data/${DATASET}/${SCENE_NAME}" \

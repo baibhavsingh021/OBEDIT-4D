@@ -513,7 +513,7 @@ def training(dataset, hyper, opt, pipe, testing_iterations, saving_iterations, c
 
     scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_iterations,
                          checkpoint_iterations, checkpoint, debug_from,
-                         gaussians, scene, "fine", tb_writer, 800, timer, ip2p, prompt, guidance_scale, image_guidance_scale)
+                         gaussians, scene, "fine", tb_writer, 500, timer, ip2p, prompt, guidance_scale, image_guidance_scale)
 
 def prepare_output_and_logger(expname):    
     if not args.model_path:
