@@ -390,21 +390,18 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
                                + effective_guidance       * (np_text  - np_image)
                                + effective_image_guidance * (np_image - np_uncond))
 
-        # ---- 4b. Phi (LoRA) score — detached inputs, LoRA gradients only ----
-        latent_phi_input = torch.cat([noisy_latents.detach()] * 3)
-        latent_phi_input = torch.cat([latent_phi_input, image_cond_cat.detach()], dim=1)
-        noise_pred_phi   = unet_phi(latent_phi_input, t,
-                                     prompt_embeds.detach(), None, None, False)[0]
-        np_phi_text, np_phi_image, np_phi_uncond = noise_pred_phi.chunk(3)
-        noise_pred_phi_cfg = (np_phi_uncond
-                              + effective_guidance       * (np_phi_text  - np_phi_image)
-                              + effective_image_guidance * (np_phi_image - np_phi_uncond))
+        # ---- 4b. Phi (LoRA) score — single-conditional (NO CFG) ----
+        # Phi learns the rendering distribution p_phi(ε | z_t, cI, cT), not a CFG composition.
+        # Single-conditional input only → saves 3x memory vs 3x stacking.
+        latent_phi_input = torch.cat([noisy_latents.detach(), image_latents_cond.detach()], dim=1)
+        noise_pred_phi = unet_phi(latent_phi_input, t,
+                                   prompt_embeds[1:2].detach(), None, None, False)[0]
 
         # ---- 5. VSD gradient ----
         alphas = ip2p.scheduler.alphas_cumprod.to(device)
         w      = (1 - alphas[t]).view(-1, 1, 1, 1)
 
-        grad = w * (noise_pred_ip2p - noise_pred_phi_cfg.detach())
+        grad = w * (noise_pred_ip2p - noise_pred_phi.detach())
         grad = torch.nan_to_num(grad)
 
         target   = (noisy_latents - grad).detach().to(dtype=torch.float16)
@@ -428,28 +425,17 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
             os.execv(sys.executable, [sys.executable] + sys.argv)
 
         # ---- 8. LoRA (phi) update ----
-        #   Train phi on raw single-conditional prediction (not CFG output).
-        #   phi learns the text-conditional denoising: p_phi(ε | z_t, cI, cT)
-        with torch.enable_grad():
-            # Single conditional input only, no CFG stacking
-            latent_phi_train_input = torch.cat(
-                [noisy_latents.detach(), image_latents_cond.detach()], dim=1
-            )
-            noise_pred_phi_train = unet_phi(
-                latent_phi_train_input, t,
-                prompt_embeds[1:2].detach(),   # index 1 = text conditional only
-                None, None, False
-            )[0]
-        
+        #   Train phi to match the diffusion noise (DDPM objective).
+        #   Reuses noise_pred_phi from section 4b (already in gradient tape).
         lora_optimizer.zero_grad()
-        loss_phi = 0.5 * F.mse_loss(noise_pred_phi_train, noise.detach(), reduction="mean")
+        loss_phi = 0.5 * F.mse_loss(noise_pred_phi, noise.detach(), reduction="mean")
         loss_phi.backward()
         lora_optimizer.step()
 
         # ---- cleanup ----
         del (clean_latents, image_latents, image_latents_cond, uncond_image_latents,
-             latent_ip2p_input, latent_phi_input, latent_phi_train_input, image_cond_cat,
-             noise_pred_ip2p, noise_pred_phi, noise_pred_phi_cfg, noise_pred_phi_train,
+             latent_ip2p_input, latent_phi_input, image_cond_cat,
+             noise_pred_ip2p, noise_pred_phi,
              noise, grad, target, loss_vsd, loss_recon, loss_phi)
         torch.cuda.empty_cache()
 
@@ -623,7 +609,7 @@ def training(dataset, hyper, opt, pipe, testing_iterations, saving_iterations,
     scene_reconstruction(
         dataset, opt, hyper, pipe, testing_iterations, saving_iterations,
         checkpoint_iterations, checkpoint, debug_from,
-        gaussians, scene, "fine", tb_writer, 800, timer,
+        gaussians, scene, "fine", tb_writer, 500, timer,
         ip2p, unet_phi, lora_optimizer,
         prompt, guidance_scale, image_guidance_scale)
 
