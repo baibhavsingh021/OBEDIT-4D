@@ -15,7 +15,7 @@ from diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianR
 from scene.gaussian_model import GaussianModel
 from utils.sh_utils import eval_sh
 from time import time as get_time
-def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0, override_color = None, stage="fine", cam_type=None):
+def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0, override_color = None, stage="fine", cam_type=None, return_geometry=False):
     """
     Render the scene. 
     
@@ -104,8 +104,8 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     colors_precomp = None
     if override_color is None:
         if pipe.convert_SHs_python:
-            shs_view = pc.get_features.transpose(1, 2).view(-1, 3, (pc.max_sh_degree+1)**2)
-            dir_pp = (pc.get_xyz - viewpoint_camera.camera_center.cuda().repeat(pc.get_features.shape[0], 1))
+            shs_view = shs_final.transpose(1, 2).view(-1, 3, (pc.max_sh_degree+1)**2)
+            dir_pp = means3D_final - viewpoint_camera.camera_center.to(means3D_final)[None]
             dir_pp_normalized = dir_pp/dir_pp.norm(dim=1, keepdim=True)
             sh2rgb = eval_sh(pc.active_sh_degree, shs_view, dir_pp_normalized)
             colors_precomp = torch.clamp_min(sh2rgb + 0.5, 0.0)
@@ -120,7 +120,7 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     rendered_image, radii, depth = rasterizer(
         means3D = means3D_final,
         means2D = means2D,
-        shs = shs_final,
+        shs = shs_final if colors_precomp is None else None,
         colors_precomp = colors_precomp,
         opacities = opacity,
         scales = scales_final,
@@ -131,9 +131,33 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     # breakpoint()
     # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
     # They will be excluded from value updates used in the splitting criteria.
-    return {"render": rendered_image,
+    result = {"render": rendered_image,
             "viewspace_points": screenspace_points,
             "visibility_filter" : radii > 0,
             "radii": radii,
             "depth":depth}
-
+    if return_geometry:
+        # Alpha-normalized depth moments use the same deformed splats as RGB.
+        with torch.no_grad():
+            homogeneous = torch.cat([means3D_final, torch.ones_like(means3D_final[:, :1])], dim=1)
+            camera_z = (homogeneous @ raster_settings.viewmatrix)[:, 2]
+            moments = torch.stack([camera_z, camera_z.square(), torch.ones_like(camera_z)], dim=1)
+            geometry_rasterizer = GaussianRasterizer(
+                raster_settings=raster_settings._replace(bg=torch.zeros_like(bg_color))
+            )
+            moment_image, _, _ = geometry_rasterizer(
+                means3D=means3D_final, means2D=means2D, colors_precomp=moments,
+                opacities=opacity, scales=scales_final, rotations=rotations_final,
+                cov3D_precomp=cov3D_precomp,
+            )
+            alpha = moment_image[2:3].clamp(0, 1)
+            surface_depth = moment_image[:1] / alpha.clamp_min(1e-6)
+            result.update(
+                means3D=means3D_final.detach(),
+                opacity=opacity.detach(),
+                alpha=alpha,
+                surface_depth=surface_depth,
+                depth_variance=(moment_image[1:2] / alpha.clamp_min(1e-6)
+                                - surface_depth.square()).clamp_min(0),
+            )
+    return result

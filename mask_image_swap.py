@@ -94,6 +94,7 @@ def load_pairs(dataset: str, scene_name: str, tag: str, num_cams: int):
 
         original = load_and_resize(orig_path)
         edited = load_and_resize(edit_path)
+        edited = cv2.resize(edited, (original.shape[1], original.shape[0]), interpolation=cv2.INTER_CUBIC)
         pairs.append((i, original, edited, edit_path))
 
     return pairs
@@ -209,14 +210,17 @@ def main():
     predictor = load_sam2_predictor()
 
     saved = 0
+    mask_dir = os.path.join(f"./data/{args.dataset}/{args.scene_name}/{tag}", "masks")
+    os.makedirs(mask_dir, exist_ok=True)
     for i, original, edited, edit_path, boxes, scores in detections:
         if len(boxes) == 0:
-            print(f"⚠️  Cam {i}: no '{tag}' detected, leaving edited file untouched.")
-            continue
-
-        mask = predict_best_mask(predictor, edited, boxes, scores)
+            print(f"Cam {i}: no '{tag}' detected, preserving the original image.")
+            mask = np.zeros(original.shape[:2], dtype=bool)
+        else:
+            mask = predict_best_mask(predictor, edited, boxes, scores)
         result = composite(original, edited, mask)
 
+        Image.fromarray(mask.astype(np.uint8) * 255).save(os.path.join(mask_dir, f"mask_cam{i:02d}.png"))
         Image.fromarray(result.astype(np.uint8)).save(edit_path)
         saved += 1
 

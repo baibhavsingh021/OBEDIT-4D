@@ -1,4 +1,5 @@
 #!/bin/bash
+set -euo pipefail
 # ===================================================================
 # ./run_instruct_4dgs.sh [dataset] [scene_name] [prompt] [guidance_scale] [image_guidance_scale]
 # ===================================================================
@@ -13,6 +14,8 @@ SCENE_NAME="$2"
 PROMPT="$3"
 GUIDANCE_SCALE="$4"
 IMAGE_GUIDANCE_SCALE="$5"
+EDIT_TAG="${PROMPT##* }"
+EDIT_TAG="${EDIT_TAG//\?/}"
 
 echo "------------------------------------------"
 echo "  - dataset: ${DATASET}"
@@ -22,14 +25,14 @@ echo "------------------------------------------"
 echo ""
 
 echo "[1/5] Collect time0 images..."
-python time0_collect.py --dataset ${DATASET} --scene_name ${SCENE_NAME}
+python time0_collect.py --dataset "${DATASET}" --scene_name "${SCENE_NAME}"
 echo ""
 echo "[2/5] edit time0 images..."
 python ./ip2p_models/multiview_edit.py \
     --dataset "${DATASET}" \
     --scene "${SCENE_NAME}" \
     --prompt "${PROMPT}" \
-    --resize 1024 \
+    --resize 512 \
     --steps 20 \
     --guidance_scale ${GUIDANCE_SCALE} \
     --image_guidance_scale ${IMAGE_GUIDANCE_SCALE}
@@ -70,7 +73,7 @@ python edit_3d.py \
 echo "✅ Completed 3d editing."
 echo ""
 
-echo "[5/5] Score refinement"
+echo "[5/5] Gaussian trajectory refinement"
 # Dynamically find the highest iteration in point_cloud_3dedit/<prompt>/
 POINT_CLOUD_3DEDIT_DIR="./output/${DATASET}/${SCENE_NAME}/point_cloud_3dedit/${PROMPT}"
 BEST_ITER_SDS=$(ls -d "${POINT_CLOUD_3DEDIT_DIR}"/iteration_* 2>/dev/null | sed 's/.*iteration_//' | sort -n | tail -1)
@@ -85,6 +88,12 @@ python refine_sds.py \
     -s "./data/${DATASET}/${SCENE_NAME}" \
     --model_path "./output/${DATASET}/${SCENE_NAME}" \
     --prompt "${PROMPT}" \
+    --refinement_mode trajectory \
+    --refine_views 2 \
+    --refine_times 2 \
+    --refine_resolution 512 \
+    --refine_target_interval 8 \
+    --refine_mask_dir "./data/${DATASET}/${SCENE_NAME}/${EDIT_TAG}/masks" \
     --guidance_scale ${GUIDANCE_SCALE} \
     --image_guidance_scale ${IMAGE_GUIDANCE_SCALE}
 echo "✅ Completed score refinement."

@@ -67,6 +67,7 @@ import math
 import os
 
 from pytorch_lightning import seed_everything   
+from utils.trajectory_refinement import add_trajectory_arguments, refine_trajectories
 
 def encode_1(ip2p, input, encode_batch_size=1):
     """Encode images to latents with batch processing to reduce memory usage."""
@@ -502,7 +503,7 @@ def training(dataset, hyper, opt, pipe, testing_iterations, saving_iterations, c
     text_encoder.requires_grad_(False)
     unet.requires_grad_(False)
 
-    vae = vae.to(device, dtype=torch_dtype)
+    vae = vae.to(device, dtype=torch.float32 if args.refinement_mode == "trajectory" else torch_dtype)
     text_encoder = text_encoder.to(device, dtype=torch_dtype)
     unet = unet.to(device, dtype=torch_dtype)
             
@@ -511,6 +512,10 @@ def training(dataset, hyper, opt, pipe, testing_iterations, saving_iterations, c
             scheduler=DDIMScheduler.from_pretrained(DDIM_SOURCE, subfolder="scheduler"),
         )
     print("Ready IP2P")
+
+    if args.refinement_mode == "trajectory":
+        refine_trajectories(scene, gaussians, pipe, opt, dataset, ip2p, args, tb_writer)
+        return
 
     scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_iterations,
                          checkpoint_iterations, checkpoint, debug_from,
@@ -617,6 +622,7 @@ if __name__ == "__main__":
     parser.add_argument("--prompt", type=str, default = "")
     parser.add_argument('--guidance_scale', type=float, default=10.5)
     parser.add_argument('--image_guidance_scale', type=float, default=1.2)
+    add_trajectory_arguments(parser)
 
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)

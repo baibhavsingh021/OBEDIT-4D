@@ -16,6 +16,37 @@ else:
     
 from einops import rearrange
 
+
+def bounded_attention(query, key, value, attn_mask=None, dropout_p=0.0, is_causal=False):
+    """Use fused attention when available, with a PyTorch 1.13 sliced fallback."""
+    if int(torch.__version__.split(".")[0]) >= 2:
+        return F.scaled_dot_product_attention(
+            query, key, value, attn_mask=attn_mask,
+            dropout_p=dropout_p, is_causal=is_causal,
+        )
+    if xformers is not None and query.is_cuda and attn_mask is None and not is_causal:
+        return xformers.ops.memory_efficient_attention(
+            query.transpose(1, 2), key.transpose(1, 2), value.transpose(1, 2),
+            p=dropout_p,
+        ).transpose(1, 2)
+    if is_causal or dropout_p:
+        raise ValueError("Sliced IP2P attention supports noncausal inference without dropout")
+    output = torch.empty_like(query)
+    for start in range(0, query.shape[-2], 128):
+        scores = torch.matmul(query[..., start:start + 128, :].float(), key.float().transpose(-1, -2))
+        scores *= query.shape[-1] ** -0.5
+        if attn_mask is not None:
+            mask = attn_mask if attn_mask.shape[-2] == 1 else attn_mask[..., start:start + 128, :]
+            if mask.dtype == torch.bool:
+                scores.masked_fill_(~mask, float("-inf"))
+            else:
+                scores += mask
+        output[..., start:start + 128, :] = torch.matmul(
+            scores.softmax(-1).to(value.dtype), value,
+        )
+    return output
+
+
 @maybe_allow_in_graph
 class BasicTransformerBlock(nn.Module):
     def __init__(
@@ -246,7 +277,7 @@ class SparseCausalAttention(Attention):
         value = value.view(batch_size, -1, self.heads, head_dim).transpose(1, 2) # (batch*num_frames, heads, 2*max_length, head_dim)
 
         # the output of sdp = (batch, num_heads, seq_len, head_dim)
-        hidden_states = F.scaled_dot_product_attention(
+        hidden_states = bounded_attention(
             query, key, value, attn_mask=attention_mask, dropout_p=0.0, is_causal=False
         ) # (batch*num_frames, heads, height*width, head_dim)
 
@@ -311,7 +342,7 @@ class KeyFrameAttention(Attention):
         value = value.view(batch_size, -1, self.heads, head_dim).transpose(1, 2) # (batch*num_frames, heads, max_length, head_dim)
 
         # the output of sdp = (batch, num_heads, seq_len, head_dim)
-        hidden_states = F.scaled_dot_product_attention(
+        hidden_states = bounded_attention(
             query, key, value, attn_mask=attention_mask, dropout_p=0.0, is_causal=False
         ) # (batch*num_frames, heads, height*width, head_dim)
 
@@ -380,7 +411,7 @@ class SlideAttention(Attention):
         value = value.view(batch_size, -1, self.heads, head_dim).transpose(1, 2) # (batch*num_frames, heads, max_length, head_dim)
 
         # the output of sdp = (batch, num_heads, seq_len, head_dim)
-        hidden_states = F.scaled_dot_product_attention(
+        hidden_states = bounded_attention(
             query, key, value, attn_mask=attention_mask, dropout_p=0.0, is_causal=False
         ) # (batch*num_frames, heads, height*width, head_dim)
 
@@ -452,7 +483,7 @@ class TestAttention(Attention):
         value = value.view(batch_size, -1, self.heads, head_dim).transpose(1, 2) # (batch*num_frames, heads, max_length, head_dim)
 
         # the output of sdp = (batch, num_heads, seq_len, head_dim)
-        hidden_states = F.scaled_dot_product_attention(
+        hidden_states = bounded_attention(
             query, key, value, attn_mask=attention_mask, dropout_p=0.0, is_causal=False
         ) # (batch*num_frames, heads, height*width, head_dim)
 

@@ -40,7 +40,7 @@ vae.requires_grad_(False)
 text_encoder.requires_grad_(False)
 unet.requires_grad_(False)
 
-vae = vae.to(device, dtype=torch_dtype)
+vae = vae.to(device, dtype=torch.float32)
 text_encoder = text_encoder.to(device, dtype=torch_dtype)
 unet = unet.to(device, dtype=torch_dtype)
         
@@ -48,28 +48,34 @@ pipe = InstructPix2PixPipeline(
         vae=vae, text_encoder=text_encoder, tokenizer=tokenizer, unet=unet,
         scheduler=DDIMScheduler.from_pretrained(DDIM_SOURCE, subfolder="scheduler"),
     )
+unet.eval().set_attention_slice("auto")
+vae.eval().enable_slicing()
+text_encoder.eval()
 
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", type=str, default="dynerf")
-    parser.add_argument("--scene_name", type=str, default="cook_spinach")
+    parser.add_argument("--scene_name", "--scene", type=str, default="cook_spinach")
     parser.add_argument("--prompt", type=str, default="What if it was painted by Van Gogh?")
-    parser.add_argument("--resize", type=int, default=None)
+    parser.add_argument("--resize", type=int, default=512)
     parser.add_argument("--steps", type=int, default=20)
     parser.add_argument("--guidance_scale", type=float, default=7.5)
     parser.add_argument("--image_guidance_scale", type=float, default=1.5)
     return parser.parse_args()
 
 args = parse_args()
+if not 64 <= args.resize <= 512:
+    raise ValueError("Use a resize between 64 and 512 for the T4 editor")
 image_dir = f'./data/{args.dataset}/time0_{args.scene_name}/'
 
 image_extensions = ('.png', '.jpg')
-try:
-    sequence_length = len([f for f in os.listdir(image_dir) 
-                       if os.path.isfile(os.path.join(image_dir, f)) and f.lower().endswith(image_extensions)])
-
-except FileNotFoundError:
-    print(f"Error: Folder not found at '{image_dir}'")
+files = sorted(
+    os.path.join(image_dir, name) for name in os.listdir(image_dir)
+    if os.path.isfile(os.path.join(image_dir, name)) and name.lower().endswith(image_extensions)
+)
+sequence_length = len(files)
+if not sequence_length:
+    raise ValueError(f"No source images found in {image_dir}")
 
 #sequence_length = args.sequence_length
 prompt = args.prompt
@@ -81,12 +87,6 @@ latents_type = 'noisy_latents' # 'noise', 'noisy_latents'
 
 tag = prompt.split(' ')[-1].replace('?', '')
 
-try:
-    files = sorted(os.listdir(image_dir), key=lambda x: int(x.split('.')[0]))
-except:
-    files = os.listdir(image_dir)
-files = [os.path.join(image_dir, file) for file in files]
-files = files[:sequence_length]
 print(f'Loaded {len(files)} images from {image_dir}')
 
 images = []
@@ -95,11 +95,10 @@ for file in files:
     width, height = image.size
     if args.resize is None:
         args.resize = max(width, height)
-    factor = args.resize / max(width, height)
-    factor = math.ceil(min(width, height) * factor / 64) * 64 / min(width, height)
-    width = int((width * factor) // 64) * 64
-    height = int((height * factor) // 64) * 64
-    image = ImageOps.fit(image, (width, height), method=Image.Resampling.LANCZOS)
+    factor = min(1, args.resize / max(width, height))
+    width = max(64, int(width * factor) // 64 * 64)
+    height = max(64, int(height * factor) // 64 * 64)
+    image = image.resize((width, height), resample=Image.Resampling.LANCZOS)
     image = torch.from_numpy(np.array(image) / 255).permute(2, 0, 1).unsqueeze(0).to(torch_dtype).to(device)
     images.append(image)
 images = torch.cat(images, dim=0) # (f, c, h, w)
@@ -112,22 +111,23 @@ images = F.interpolate(images, size=(RH, RW), mode='bilinear', align_corners=Fal
 images_cond = images.clone().to(device, dtype=torch_dtype) # (f, c, h, w)
 
 with torch.no_grad():
-    latents = pipe.vae.encode(2*images-1).latent_dist.sample() * 0.18215  # (b*f, 4, h//4, w//4)
-    image_latents = pipe.vae.encode(2*images_cond-1).latent_dist.mode() # (b*f, 4, h//4, w//4)
+    image_latents = torch.cat([
+        pipe.vae.encode(2 * image[None].float() - 1).latent_dist.mode()
+        for image in images_cond
+    ]).to(torch_dtype)
+    latents = image_latents * pipe.vae.config.scaling_factor
 
 latents = rearrange(latents, "(b f) c h w -> b c f h w", f=sequence_length) # (b, 4, f, h//4, w//4)
 image_latents = rearrange(image_latents, "(b f) c h w -> b c f h w", f=sequence_length) # (b, 4, f, h//4, w//4)
 uncond_image_latents = torch.zeros_like(image_latents)
 
-prompt_embeds = pipe._encode_prompt(
-    prompt,
-    device=device,
-    num_images_per_prompt=1,
-    do_classifier_free_guidance=True,
-) # [3b, 77, 768]
+with torch.no_grad():
+    prompt_embeds = pipe._encode_prompt(
+        prompt, device=device, num_images_per_prompt=1, do_classifier_free_guidance=True,
+    )
+text_encoder.to("cpu")
 
-pipe.scheduler.config.num_train_timesteps = num_train_timesteps
-pipe.scheduler.set_timesteps(diffusion_step)
+pipe.scheduler.set_timesteps(diffusion_step, device=device)
 
 if latents_type == 'noise':
     latents = torch.randn_like(latents)
@@ -137,33 +137,35 @@ elif latents_type == 'noisy_latents':
 else:
     raise NotImplementedError
     
-image_latents = torch.cat([image_latents, image_latents, uncond_image_latents], dim=0) # (3b, 4, f, h//4, w//4)
-
 for i, t in tqdm(enumerate(pipe.scheduler.timesteps), total=len(pipe.scheduler.timesteps), desc="Inference"):
-    
-    latent_model_input = torch.cat([latents] * 3) # [3b, 4, sequence_length, h//4, w//4]
-    latent_model_input = torch.cat([latent_model_input, image_latents], dim=1) # [3b, 8, sequence_length, h//4, w//4]
-    
-    # predict the noise residual
     with torch.no_grad():
-        noise_pred = pipe.unet(latent_model_input, t, prompt_embeds, None, None, False)[0] # [3b, 4, sequence_length, h//4, w//4]
-    
-    # perform classifier-free guidance
-    noise_pred_text, noise_pred_image, noise_pred_uncond = noise_pred.chunk(3)
-    
-    noise_pred = (
-        noise_pred_uncond
-        + guidance_scale * (noise_pred_text - noise_pred_image)
-        + image_guidance_scale * (noise_pred_image - noise_pred_uncond)
-    )
+        predictions = []
+        for frame in range(sequence_length):
+            # Keyframe attention sees the same anchor in every bounded pair.
+            slots = [0] if frame == 0 else [0, frame]
+            branches = []
+            for branch in range(3):
+                condition = image_latents[:, :, slots] if branch < 2 else uncond_image_latents[:, :, slots]
+                model_input = torch.cat([latents[:, :, slots], condition], dim=1)
+                prediction = pipe.unet(
+                    model_input, t, prompt_embeds[branch:branch + 1],
+                    return_dict=False,
+                )[0]
+                branches.append(prediction[:, :, -1:])
+            text, image, unconditional = branches
+            predictions.append(
+                unconditional + guidance_scale * (text - image)
+                + image_guidance_scale * (image - unconditional)
+            )
+        noise_pred = torch.cat(predictions, dim=2)
     
     # compute the previous noisy sample x_t -> x_t-1
     latents = pipe.scheduler.step(noise_pred, t, latents, return_dict=False)[0] # [b, c, f, h//4, w//4]
     
 latents = rearrange(latents, "b c f h w -> (b f) c h w")
-latents = 1 / 0.18215 * latents # (b*f, 4, h//4, w//4)
+latents = latents / pipe.vae.config.scaling_factor
 with torch.no_grad():
-    video = pipe.vae.decode(latents).sample # (b*f, 3, h, w)
+    video = torch.cat([pipe.vae.decode(latent[None].float()).sample.cpu() for latent in latents])
     
 video = (video / 2 + 0.5).clamp(0, 1) # (b*f, 3, h, w) [-1, 1] -> [0, 1]
 
@@ -173,6 +175,5 @@ for i in range(sequence_length):
     filename = f"edited_{prompt.split(' ')[-1].replace('?', '')}_{os.path.basename(files[i])}"
     save_path = os.path.join(save_dir, filename)
     torchvision.utils.save_image(video[i], save_path)
-
 
 
