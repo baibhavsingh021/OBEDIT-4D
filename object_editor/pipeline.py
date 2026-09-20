@@ -39,7 +39,7 @@ class ObjectEditorPipeline:
                      if index != anchor_view]
         for view_index in order:
             view_references = references or []
-            if anchor_result is not None:
+            if anchor_result is not None and not self.anchor.disabled:
                 view_references = [anchor_result] + list(view_references)
             result = self.adapter.edit(
                 images[view_index:view_index + 1], instruction,
@@ -48,7 +48,7 @@ class ObjectEditorPipeline:
             )
             if result.shape != images[view_index:view_index + 1].shape:
                 raise ValueError("adapter returned an image with the wrong shape")
-            edited[view_index] = result[0]
+            edited[view_index] = result[0].detach().cpu()
             if view_index == anchor_view:
                 anchor_result = result[0].detach()
 

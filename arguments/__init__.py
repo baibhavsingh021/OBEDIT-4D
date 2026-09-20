@@ -153,7 +153,7 @@ class EditorParams(ParamGroup):
     """Configuration shared by the standalone object editor bridge."""
     def __init__(self, parser):
         self.editor_model = "omnigen"
-        self.editor_ckpt = "BAAI/OmniGen-v1"
+        self.editor_ckpt = "Shitao/OmniGen-v1"
         self.disable_cgfa = False
         self.disable_gaxlc = False
         self.disable_prlp = False

@@ -24,7 +24,7 @@ def build_parser():
     parser.add_argument("--mask_dir", required=True)
     parser.add_argument("--output_dir", required=True)
     parser.add_argument("--editor_model", choices=("omnigen", "sdxl", "ip2p"), default="omnigen")
-    parser.add_argument("--editor_ckpt", default="BAAI/OmniGen-v1")
+    parser.add_argument("--editor_ckpt", default="Shitao/OmniGen-v1")
     parser.add_argument("--target_query", default="")
     parser.add_argument("--edit_instruction", required=True)
     parser.add_argument("--edit_type", choices=[item.value for item in EditType], default="appearance")
@@ -61,6 +61,8 @@ def main(argv=None):
         raise FileNotFoundError("No PNG images found in {}".format(args.images_dir))
     if len(image_paths) != len(mask_paths):
         raise ValueError("images and masks must contain the same number of PNG files")
+    if [path.name for path in image_paths] != [path.name for path in mask_paths]:
+        raise ValueError("image and mask filenames must match one-to-one")
     to_tensor = transforms.ToTensor()
     images = torch.stack([
         to_tensor(Image.open(path).convert("RGB")) * 2.0 - 1.0

@@ -1,15 +1,15 @@
 # Colab Guide
 
-This guide describes the current `object_editor` integration. It uses two
-Colab environments because the legacy 4DGS stack and the diffusion editor
-require incompatible PyTorch/Diffusers generations.
+This guide describes the current `object_editor` integration in one Colab
+notebook and one runtime. It uses one modern PyTorch environment; do not
+install the old pinned Diffusers requirements after the unified requirements.
 
 The current integration is staged:
 
-1. The 4DGS environment trains/loads a scene and produces synchronized images
+1. The 4DGS code trains/loads a scene and produces synchronized images
    and reconciled masks on disk.
-2. The standalone editor environment edits those PNGs and writes edited PNGs.
-3. The 4DGS environment consumes the edited PNGs for canonical fitting and
+2. The object editor edits those PNGs and writes edited PNGs.
+3. The same runtime consumes the edited PNGs for canonical fitting and
    existing temporal refinement.
 4. The existing renderer produces the final 4D output.
 
@@ -25,16 +25,13 @@ Change runtime type > T4 GPU**. Confirm that the runtime has CUDA before
 installing anything. Do not install the standalone object-editor requirements
 into the legacy 4DGS environment.
 
-A practical workflow uses two notebooks or two runtime sessions:
-
-- **Notebook A:** legacy 4DGS environment and Gaussian fitting/refinement.
-- **Notebook B:** standalone Python 3.10+ editor environment.
-
-Colab runtime resets delete `/content`; save all durable files under Drive.
+The workflow is designed for one notebook. Colab runtime resets delete
+`/content`; save all durable files under Drive. The legacy IP2P fallback is
+kept selectable but is not part of the default modern dependency path.
 
 ## 1. Mount Drive and choose paths
 
-Run this first in both notebooks.
+Run this first in the notebook.
 
 ```python
 from google.colab import drive
@@ -68,35 +65,27 @@ Expected result: the branch is `object_editor`, `object_editor/`,
 push may require the repository owner to publish the branch; if cloning the
 branch fails, the branch must first be pushed or downloaded as an archive.
 
-## 3. Prepare Notebook A: legacy 4DGS
+## 3. Install the unified single-runtime environment
 
-The original repository uses an older stack. Start from a fresh runtime for
-this notebook. Installing modern Diffusers packages into this runtime can break
-`edit_3d.py` and the custom CUDA extensions.
-
-```bash
-%cd /content/OBEDIT-4D
-sudo apt-get update -qq
-sudo apt-get install -y libglm-dev
-```
-
-Install the legacy requirements only after checking the CUDA/PyTorch versions
-expected by the project. The repository's `requirements.txt` contains old
-Diffusers/Transformers pins and is not the standalone editor environment.
+Do not run `pip install -r requirements.txt` in this workflow. That file pins
+old Diffusers/Transformers versions for the legacy IP2P path and conflicts with
+OmniGen. Install the unified file instead:
 
 ```bash
 %cd /content/OBEDIT-4D
-pip install -r requirements.txt
+pip install -r object_editor/requirements-colab.txt
+pip install --no-deps "git+https://github.com/VectorSpaceLab/OmniGen.git"
 pip install -e submodules/depth-diff-gaussian-rasterization
 pip install -e submodules/simple-knn
 ```
 
-Expected result: the rasterizer and `simple-knn` extensions build without
-compiler errors. If a CUDA extension fails, stop there and repair the Colab
-CUDA/PyTorch compatibility before proceeding; do not mix in
-`object_editor/requirements.txt`.
+Expected result: OmniGen, modern Diffusers dependencies, the rasterizer, and
+`simple-knn` are installed in the same runtime. If pip replaces Torch, restart
+the runtime once, remount Drive, return to `/content/OBEDIT-4D`, and continue
+from the next cell. If a CUDA extension fails, stop and repair the Torch/CUDA
+match before running a long edit.
 
-## 4. Prepare scene data in Notebook A
+## 4. Prepare scene data
 
 Place a processed scene and a trained 4DGS checkpoint in persistent storage.
 The expected legacy layout is approximately:
@@ -149,30 +138,10 @@ find /content/drive/MyDrive/OBEDIT-4D/inputs/masks -name '*.png' | sort | head
 The important invariant is equal file counts, matching sorted order, and
 identical spatial resolution.
 
-## 6. Prepare Notebook B: standalone editor
+## 6. Run the editor in the same runtime
 
-Start a fresh Colab runtime for this notebook, mount Drive, and clone the same
-branch. This prevents the old 4DGS dependencies from taking precedence.
-
-```bash
-%cd /content
-rm -rf /content/OBEDIT-4D
- git clone --branch object_editor https://github.com/baibhavsingh021/OBEDIT-4D.git OBEDIT-4D
-%cd /content/OBEDIT-4D
-```
-
-Install the standalone requirements. This can replace the preinstalled Colab
-Torch packages, so do it only in Notebook B.
-
-```bash
-%cd /content/OBEDIT-4D
-pip install -r object_editor/requirements.txt
-```
-
-After installation, restart the Colab runtime if pip reports that Torch or
-TorchVision was replaced. After restart, remount Drive and return to
-`/content/OBEDIT-4D`. Do not run both old and new dependency sets in the same
-runtime.
+There is no second notebook or environment. Continue in the same runtime after
+the input images and masks exist.
 
 ## 7. Run the standalone editor
 
@@ -185,7 +154,7 @@ python -m object_editor.scripts.edit_object \
   --mask_dir /content/drive/MyDrive/OBEDIT-4D/inputs/masks \
   --output_dir /content/drive/MyDrive/OBEDIT-4D/edited \
   --editor_model omnigen \
-  --editor_ckpt BAAI/OmniGen-v1 \
+  --editor_ckpt Shitao/OmniGen-v1 \
   --target_query "the red water bottle" \
   --edit_instruction "make the water bottle metallic blue" \
   --edit_type appearance \
@@ -232,9 +201,9 @@ python -m object_editor.scripts.edit_object \
 
 ## 8. Important current limitations
 
-- OmniGen must be available through the installed Diffusers version and its
-  actual pipeline API. The adapter is lazy-loaded; failures at this point are
-  model/API compatibility failures, not mask failures.
+- OmniGen is installed from its official repository and imported as
+  `OmniGen.OmniGenPipeline`; the adapter is lazy-loaded. Diagnose model/API
+  failures before starting a long Gaussian run.
 - `--disable_*` flags are configuration controls, but full CGFA/GAXLC behavior
   requires renderer-produced correspondence maps. The current folder entry
   point has no map-loading CLI, so GAXLC is inactive unless integrated by a
@@ -246,13 +215,12 @@ python -m object_editor.scripts.edit_object \
 - IP2P remains a legacy selection path, but the new standalone CLI is not a
   drop-in replacement for the old text-embedding call signature.
 
-## 9. Feed edited images back to Notebook A
+## 9. Feed edited images back into the same runtime
 
-Copy or reference the editor output directory from Notebook A. The modified
-`edit_3d.py` resolves files by the deterministic run name and several common
-camera filename formats. The legacy script uses repository-relative
-`./data/...` paths, so create a Drive-backed link in Notebook A if your data is
-stored only on Drive:
+The modified `edit_3d.py` resolves files by the deterministic run name and
+several common camera filename formats. It now accepts the editor output
+directly through `--edited_images_path`. A Drive-backed data link is useful for
+scene loading:
 
 ```bash
 %cd /content/OBEDIT-4D
@@ -279,13 +247,12 @@ python edit_3d.py \
   --edit_instruction "make the target metallic blue" \
   --edit_type appearance \
   --run_name edit_appearance_<hash> \
+  --edited_images_path /content/drive/MyDrive/OBEDIT-4D/edited/edit_appearance_<hash> \
   --ply_path /content/drive/MyDrive/OBEDIT-4D/output/dynerf/cook_spinach/point_cloud/.../point_cloud.ply
 ```
 
 Use the exact model/checkpoint arguments required by your existing scene setup.
-The edited image directory must be where the legacy script constructs it, or
-provide the equivalent path through the existing project wrapper. Inspect the
-printed `edited_images_path` before a long refinement run.
+Inspect the supplied `edited_images_path` before a long refinement run.
 
 Expected result: a saved edited Gaussian point cloud under the configured
 model output, followed by the existing temporal/refinement artifacts. The

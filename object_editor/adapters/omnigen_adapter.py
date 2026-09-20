@@ -18,7 +18,7 @@ class OmniGenAdapter(BaseEditorAdapter):
         supports_cpu_offload=True,
     )
 
-    def __init__(self, model_path="BAAI/OmniGen-v1", device="cuda",
+    def __init__(self, model_path="Shitao/OmniGen-v1", device="cuda",
                  enable_cpu_offload=True, vae_tiling=True):
         super().__init__(device=device, dtype=torch.float16)
         self.model_path = model_path
@@ -30,22 +30,15 @@ class OmniGenAdapter(BaseEditorAdapter):
         if self._pipeline is not None:
             return
         try:
-            from diffusers import OmniGenPipeline
+            from OmniGen import OmniGenPipeline
         except ImportError as exc:
             raise ImportError(
-                "OmniGen requires a standalone newer diffusers environment; "
-                "the legacy Python 3.7 4DGS environment is not sufficient."
+                "OmniGen is missing. Install object_editor/requirements-colab.txt "
+                "in the current runtime before constructing the editor."
             ) from exc
-        pipe = OmniGenPipeline.from_pretrained(
-            self.model_path, torch_dtype=torch.float16
+        self._pipeline = OmniGenPipeline.from_pretrained(
+            self.model_path, use_fp16=True
         )
-        if self.enable_cpu_offload:
-            pipe.enable_sequential_cpu_offload()
-        else:
-            pipe.to(self.device)
-        if self.vae_tiling and hasattr(pipe, "vae") and hasattr(pipe.vae, "enable_tiling"):
-            pipe.vae.enable_tiling()
-        self._pipeline = pipe
 
     def edit(self, image, instruction, target_mask=None, references=None,
              negative_prompt=None, **kwargs):
@@ -57,19 +50,27 @@ class OmniGenAdapter(BaseEditorAdapter):
         import torchvision.transforms as transforms
 
         to_pil = transforms.ToPILImage()
-        images = [to_pil(((image[0].detach().cpu().float() + 1.0) / 2.0).clamp(0, 1))]
+        input_images = [to_pil(((image[0].detach().cpu().float() + 1.0) / 2.0).clamp(0, 1))]
         for reference in references or []:
             if reference.ndim == 4:
                 reference = reference[0]
-            images.append(to_pil(((reference.detach().cpu().float() + 1.0) / 2.0).clamp(0, 1)))
+            input_images.append(to_pil(((reference.detach().cpu().float() + 1.0) / 2.0).clamp(0, 1)))
+        placeholders = " ".join(
+            "<img><|image_{}|></img>".format(index + 1)
+            for index in range(len(input_images))
+        )
+        prompt = "{} Reference images: {}".format(instruction, placeholders)
         # The public OmniGen API has no verified latent mask hook here. The
         # caller restores the protected complement after generation.
-        result = self._pipeline(
-            prompt=instruction,
-            images=images,
+        generated = self._pipeline(
+            prompt=prompt,
+            input_images=input_images,
             num_inference_steps=kwargs.get("num_inference_steps", 30),
-            guidance_scale=kwargs.get("guidance_scale", 7.5),
+            guidance_scale=kwargs.get("guidance_scale", 2.5),
+            img_guidance_scale=kwargs.get("img_guidance_scale", 1.6),
             height=image.shape[-2], width=image.shape[-1],
-        ).images[0]
+            offload_model=self.enable_cpu_offload,
+        )
+        result = generated[0] if isinstance(generated, (list, tuple)) else generated.images[0]
         output = transforms.ToTensor()(result).unsqueeze(0).to(self.device, self.dtype)
         return output * 2.0 - 1.0

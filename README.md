@@ -101,10 +101,14 @@ pip install -r requirements.txt
 ## Usage Instructions
 
 For the new adapter-based editor and the complete Colab workflow, see
-[docs/COLAB_GUIDE.md](docs/COLAB_GUIDE.md). The new editor uses a separate
-modern Diffusers environment and communicates with the legacy 4DGS process
-through synchronized images and masks; do not install both dependency sets in
-the same runtime.
+[docs/COLAB_GUIDE.md](docs/COLAB_GUIDE.md). The new editor uses a unified
+modern Colab environment and communicates with the 4DGS code through
+synchronized images and masks; do not install the old root dependency pins
+after the unified Colab requirements.
+
+The recommended current workflow is now a single Colab runtime using
+`object_editor/requirements-colab.txt`; the detailed notebook template is
+`notebooks/OBEDIT_4D_Colab.ipynb`.
 
 ### 1. Prepare the data
 

@@ -141,6 +141,13 @@ def resolve_edited_image_path(edited_images_path, run_name, image_name, maxtime)
         path = os.path.join(edited_images_path, filename)
         if os.path.isfile(path):
             return path
+    if os.path.isdir(edited_images_path):
+        for filename in sorted(os.listdir(edited_images_path)):
+            stem, extension = os.path.splitext(filename)
+            if extension.lower() != ".png" or not stem.isdigit():
+                continue
+            if int(stem) == view_number:
+                return os.path.join(edited_images_path, filename)
     raise FileNotFoundError(
         "No edited image for camera {} in {}. Tried: {}".format(
             image_name, edited_images_path, ", ".join(candidates))
@@ -565,6 +572,7 @@ if __name__ == "__main__":
     parser.add_argument("--expname", type=str, default = "")
     parser.add_argument("--configs", type=str, default = "")
     parser.add_argument("--ply_path", type=str, default = "")
+    parser.add_argument("--edited_images_path", type=str, default = None)
 
     parser.add_argument("--dataset", type=str, default = "")
     parser.add_argument("--scene", type=str, default = "")
@@ -588,7 +596,7 @@ if __name__ == "__main__":
 
     args.prompt = args.edit_instruction or args.prompt
     run_name = get_run_name(args)
-    edited_images_path = os.path.join(
+    edited_images_path = args.edited_images_path or os.path.join(
         "./data", args.dataset, args.scene, run_name
     )
 

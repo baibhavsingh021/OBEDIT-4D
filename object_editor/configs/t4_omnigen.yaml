@@ -1,5 +1,5 @@
 editor: omnigen
-model_path: BAAI/OmniGen-v1
+model_path: Shitao/OmniGen-v1
 device: cuda
 dtype: float16
 cpu_offload: true
