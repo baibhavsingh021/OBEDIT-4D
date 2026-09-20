@@ -100,6 +100,12 @@ pip install -r requirements.txt
 
 ## Usage Instructions
 
+For the new adapter-based editor and the complete Colab workflow, see
+[docs/COLAB_GUIDE.md](docs/COLAB_GUIDE.md). The new editor uses a separate
+modern Diffusers environment and communicates with the legacy 4DGS process
+through synchronized images and masks; do not install both dependency sets in
+the same runtime.
+
 ### 1. Prepare the data
 
 Download N3DV from the official source above and process it following the 4DGS
