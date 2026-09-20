@@ -149,6 +149,51 @@ class OptimizationParams(ParamGroup):
         self.add_point=False
         super().__init__(parser, "Optimization Parameters")
 
+class EditorParams(ParamGroup):
+    """Configuration shared by the standalone object editor bridge."""
+    def __init__(self, parser):
+        self.editor_model = "omnigen"
+        self.editor_ckpt = "BAAI/OmniGen-v1"
+        self.disable_cgfa = False
+        self.disable_gaxlc = False
+        self.disable_prlp = False
+        self.disable_tasds = False
+        self.target_query = None
+        self.edit_instruction = ""
+        self.edit_type = "appearance"
+        self.manual_mask_dir = None
+        self.preservation_mode = "strict"
+        self.cpu_offload = True
+        self.vae_tiling = True
+        self.sequential_views = True
+        self.max_views_per_batch = 1
+        self.coupling_strength = 0.7
+        self.run_name = None
+        super().__init__(parser, "Object Editor Parameters")
+        group = parser.add_argument_group("Object Editor Memory Overrides")
+        group.add_argument("--no_cpu_offload", dest="cpu_offload",
+                           action="store_false", help="Disable editor CPU offload")
+        group.add_argument("--no_vae_tiling", dest="vae_tiling",
+                           action="store_false", help="Disable VAE tiling")
+        group.add_argument("--no_sequential_views", dest="sequential_views",
+                           action="store_false", help="Disable sequential view processing")
+
+    def extract(self, args):
+        group = super().extract(args)
+        if group.editor_model not in ("omnigen", "sdxl", "ip2p"):
+            raise ValueError("Unsupported editor_model: {}".format(group.editor_model))
+        if group.edit_type not in ("appearance", "replacement", "removal",
+                                   "background", "geometry", "style"):
+            raise ValueError("Unsupported edit_type: {}".format(group.edit_type))
+        if group.preservation_mode not in ("strict", "relaxed", "free"):
+            raise ValueError("Unsupported preservation_mode: {}".format(
+                group.preservation_mode))
+        if group.max_views_per_batch < 1:
+            raise ValueError("max_views_per_batch must be positive")
+        if not 0.0 <= group.coupling_strength <= 1.0:
+            raise ValueError("coupling_strength must be in [0, 1]")
+        return group
+
 def get_combined_args(parser : ArgumentParser):
     cmdlne_string = sys.argv[1:]
     cfgfile_string = "Namespace()"

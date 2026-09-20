@@ -22,7 +22,8 @@ import uuid
 from tqdm import tqdm
 from utils.image_utils import psnr
 from argparse import ArgumentParser, Namespace
-from arguments import ModelParams, PipelineParams, OptimizationParams, ModelHiddenParams
+from arguments import (ModelParams, PipelineParams, OptimizationParams,
+                       ModelHiddenParams, EditorParams)
 from torch.utils.data import DataLoader, Subset
 from utils.timer import Timer
 from utils.loader_utils import FineSampler, get_stamp_list
@@ -89,9 +90,67 @@ dict_sear_steak = {
     6000: None
 }
 
-def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_iterations, 
+def get_run_name(args):
+    """Return a stable run name without depending on prompt tokenization."""
+    if getattr(args, "run_name", None):
+        return args.run_name
+    import hashlib
+    target = getattr(args, "target_query", None) or "legacy-target"
+    instruction = getattr(args, "edit_instruction", None) or getattr(args, "prompt", "")
+    edit_type = getattr(args, "edit_type", None) or "legacy"
+    spec = "{}|{}|{}".format(target, instruction, edit_type)
+    return "edit_{}_{}".format(edit_type, hashlib.md5(spec.encode()).hexdigest()[:8])
+
+def get_cameras_for_scene(scene, scene_loaders=None, timestep=0):
+    """Return cameras from the loaded scene, without scene-name tables."""
+    if hasattr(scene, "getTrainCameras"):
+        return scene.getTrainCameras()
+    if hasattr(scene, "cameras"):
+        return scene.cameras
+    raise ValueError(
+        "Scene object of type {} has no camera accessor. Ensure the scene "
+        "was loaded with camera information.".format(type(scene))
+    )
+
+def get_target_images_for_timestep(timestep, edited_t0_images,
+                                   dataloader=None, trajectory_transport=None):
+    """Choose timestep supervision without assuming a dataloader exists."""
+    if dataloader is not None and hasattr(dataloader, "has_timestep"):
+        if dataloader.has_timestep(timestep):
+            return dataloader.get_edited_images(timestep)
+    if trajectory_transport is not None:
+        return trajectory_transport.transport_images(
+            edited_t0_images, from_t=0, to_t=timestep
+        )
+    print("[WARNING] No supervision for timestep {}, falling back to t=0.".format(timestep))
+    return edited_t0_images
+
+def resolve_edited_image_path(edited_images_path, run_name, image_name, maxtime):
+    """Resolve generic editor output names while retaining legacy layouts."""
+    view_number = int(image_name)
+    candidates = [
+        "edited_{}_original_time0_{}.png".format(run_name, view_number),
+        "edited_{}_render_time0_{}.png".format(run_name, view_number),
+        "edited_{}_original_time0_{}.png".format(run_name, view_number + 1),
+        "{}.png".format(view_number),
+        "{:04d}.png".format(view_number),
+        "{:05d}.png".format(view_number),
+        "{:06d}.png".format(view_number),
+    ]
+    for filename in candidates:
+        path = os.path.join(edited_images_path, filename)
+        if os.path.isfile(path):
+            return path
+    raise FileNotFoundError(
+        "No edited image for camera {} in {}. Tried: {}".format(
+            image_name, edited_images_path, ", ".join(candidates))
+    )
+
+def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_iterations,
                          checkpoint_iterations, checkpoint, debug_from,
-                         gaussians, scene, stage, tb_writer, train_iter,timer,edited_images_path, prompt, scene_name):
+                         gaussians, scene, stage, tb_writer, train_iter, timer,
+                         edited_images_path, prompt, scene_name,
+                         trajectory_transport=None):
     first_iter = 0
 
     gaussians.training_only3dgs_setup(opt)
@@ -244,18 +303,16 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
             image_pil.save("render_{:d}.png".format(int(viewpoint_cam.image_name)))
             '''
             if scene.dataset_type!="PanopticSports":
-                # TODO : path 
-                #image = Image.open(os.path.join(edited_images_path, f"edited_{prompt.split(' ')[-1].replace('?', '')}_original_time0_{dict_sear_steak[int(viewpoint_cam.image_name)]}.png"))
-                if scene_name not in ['sear_steak', 'coffee_martini', 'cook_spinach'] and scene.maxtime < 6000:
-                    raise NotImplementedError("sorry, please check the camera settings manually and set the dict_(scene_name)")
-                if scene_name == 'sear_steak':
-                    image = Image.open(os.path.join(edited_images_path, f"edited_{prompt.split(' ')[-1].replace('?', '')}_original_time0_{dict_sear_steak[int(viewpoint_cam.image_name)]}.png"))
-                elif scene_name == 'coffee_martini':
-                    image = Image.open(os.path.join(edited_images_path, f"edited_{prompt.split(' ')[-1].replace('?', '')}_original_time0_{dict_coffee_martini[int(viewpoint_cam.image_name)]}.png"))
-                else:
-                    image = Image.open(os.path.join(edited_images_path, f"edited_{prompt.split(' ')[-1].replace('?', '')}_original_time0_{1+int(viewpoint_cam.image_name)//scene.maxtime}.png"))
+                image_path = resolve_edited_image_path(
+                    edited_images_path, prompt, viewpoint_cam.image_name, scene.maxtime
+                )
+                image = Image.open(image_path).convert("RGB")
                 transform = transforms.ToTensor()
-                gt_image = transform(image).cuda()
+                edited_t0_image = transform(image).cuda()
+                timestep = int(round(float(getattr(viewpoint_cam, "time", 0))))
+                gt_image = get_target_images_for_timestep(
+                    timestep, edited_t0_image, trajectory_transport=trajectory_transport
+                )
             else:
                 gt_image  = viewpoint_cam['image'].cuda()
 
@@ -299,10 +356,14 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
         #     lpipsloss = lpips_loss(image_tensor,gt_image_tensor,lpips_model)
         #     loss += opt.lambda_lpips * lpipsloss
         
-        loss.backward()
         if torch.isnan(loss).any():
-            print("loss is nan,end training, reexecv program now.")
-            os.execv(sys.executable, [sys.executable] + sys.argv)
+            print("[WARNING] NaN loss at iteration {}. Skipping update and "
+                  "reducing the learning rate.".format(iteration))
+            for param_group in gaussians.optimizer.param_groups:
+                param_group["lr"] *= 0.5
+            gaussians.optimizer.zero_grad(set_to_none=True)
+            continue
+        loss.backward()
         viewspace_point_tensor_grad = torch.zeros_like(viewspace_point_tensor)
         for idx in range(0, len(viewspace_point_tensor_list)):
             viewspace_point_tensor_grad = viewspace_point_tensor_grad + viewspace_point_tensor_list[idx].grad
@@ -491,6 +552,7 @@ if __name__ == "__main__":
     op = OptimizationParams(parser)
     pp = PipelineParams(parser)
     hp = ModelHiddenParams(parser)
+    ep = EditorParams(parser)
     parser.add_argument('--ip', type=str, default="127.0.0.1")
     parser.add_argument('--port', type=int, default=6009)
     parser.add_argument('--debug_from', type=int, default=-1)
@@ -524,9 +586,13 @@ if __name__ == "__main__":
     network_gui.init(args.ip, args.port)
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
 
-    edited_images_path = f"./data/{args.dataset}/{args.scene}/{args.prompt.split(' ')[-1].replace('?', '')}"
+    args.prompt = args.edit_instruction or args.prompt
+    run_name = get_run_name(args)
+    edited_images_path = os.path.join(
+        "./data", args.dataset, args.scene, run_name
+    )
 
-    training(lp.extract(args), hp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from, args.expname, edited_images_path, args.prompt, args.scene)
+    training(lp.extract(args), hp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from, args.expname, edited_images_path, run_name, args.scene)
 
     # All done
     print("\nTraining complete.")
