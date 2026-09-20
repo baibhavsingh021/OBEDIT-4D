@@ -1,0 +1,9 @@
+editor: omnigen
+is_background_only: true
+edit_type: background
+preservation: strict
+# Foreground is protected; masks must be reconciled with 4DGS visibility.
+disable_cgfa: false
+disable_gaxlc: false
+disable_prlp: false
+disable_tasds: false

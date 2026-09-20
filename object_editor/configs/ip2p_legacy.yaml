@@ -1,0 +1,7 @@
+editor: ip2p
+# Keeps the existing updated_Editor/master path selectable.
+use_existing_pipeline: true
+disable_cgfa: true
+disable_gaxlc: true
+disable_prlp: true
+disable_tasds: true

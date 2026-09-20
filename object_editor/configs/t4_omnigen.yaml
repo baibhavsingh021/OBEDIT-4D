@@ -1,0 +1,15 @@
+editor: omnigen
+model_path: BAAI/OmniGen-v1
+device: cuda
+dtype: float16
+cpu_offload: true
+vae_tiling: true
+sequential_views: true
+max_views_per_call: 1
+num_inference_steps: 30
+guidance_scale: 7.5
+# These mechanisms require renderer-produced correspondence/masks.
+disable_cgfa: false
+disable_gaxlc: false
+disable_prlp: false
+disable_tasds: false

@@ -1,0 +1,8 @@
+editor: sdxl
+model_path: stabilityai/stable-diffusion-xl-base-1.0
+device: cuda
+dtype: float16
+cpu_offload: true
+vae_tiling: true
+sequential_views: true
+max_views_per_call: 1

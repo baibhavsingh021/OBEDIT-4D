@@ -1,0 +1,5 @@
+editor: omnigen
+edit_type: appearance
+preservation: strict
+# Person parsing is optional; core targeting remains open-vocabulary.
+sequential_views: true
